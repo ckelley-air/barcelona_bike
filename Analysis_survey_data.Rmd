@@ -1,0 +1,258 @@
+---
+title: "Analysis_survey_responses"
+author: "Josep Espasa Reig"
+output: html_notebook
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r}
+
+rm(list = ls())
+
+library(sjlabelled)
+library(haven)
+library(fs)
+library(here)
+library(magrittr)
+library(tidyverse)
+
+```
+
+# Read all surveys
+
+Everything was found here: https://ajuntament.barcelona.cat/en/content/public-opinion-poll-register-0
+
+RDS
+```{r}
+
+path_all_surveys <- fs::dir_ls(here("data", "survey", "omnibus_surveys"))
+
+#all_surveys_data <- map(path_all_surveys, read_rds)
+
+
+```
+
+SPSS
+```{r}
+
+path_all_sav_files <- dir_ls(here("data", "survey", "omnibus_surveys", "sav"))
+
+  # we are interested in the labels to see which variables had something to do with bicicles
+
+all_surveys_spss_data <- map(path_all_sav_files, read_sav)
+
+names(all_surveys_spss_data) <- names(all_surveys_spss_data) %>%
+  str_remove("C:/Users/josep/Desktop/R/barcelona_bike/data/survey/omnibus_surveys/sav/")
+
+```
+
+
+
+# Check which surveys contain vars related to biking
+
+```{r}
+
+labels_all_surveys <- map(all_surveys_spss_data, sjlabelled::get_label)
+
+lookup_names_labels <- map(all_surveys_spss_data, function(x){
+  
+  data_frame(var_names = names(x), 
+             var_labels = sjlabelled::get_label(x))
+  
+})
+
+labels_all_surveys %>%
+    map(~ .x %>% str_subset("BICI"))
+
+```
+
+# Main socio-demographic questions
+
+## Age
+
+Careful, some surveys have people with less than 16 yo, others they don't.
+
+We will assume that all responses come from the same population. It's not ideal, but looks like the only feasible option.
+```{r}
+
+age_vars_name <- lookup_names_labels %>%
+  map(~ .x$var_labels %>% str_which(pattern = "EDAT"))
+
+age_vars_name %<>%
+  map_dbl(min)
+
+age_all_surveys <- all_surveys_spss_data %>%
+  map2(.y = age_vars_name, ~ .x %>% 
+         select(.y) )
+
+age_all_surveys_categorical <- age_all_surveys %>%
+  map(~ .x %>% mutate_all(function(x){cut(x, breaks = c(0, 16, 25, 40, 65, 80, 100))}))
+
+# Recode age variable into categories
+
+```
+
+
+
+## District
+
+```{r}
+
+district_vars_name <- lookup_names_labels %>%
+  map(~ .x$var_labels %>% str_which(pattern = "DISTRICTE"))
+
+district_all_surveys <- all_surveys_spss_data %>%
+  map2(.y = district_vars_name, ~ .x %>% select(.y) )
+
+district_lookup_names <- data_frame(district_name = district_all_surveys$r16038_Òmnibus_Desembre_A_BDD_V_1_0.sav %>% get_labels() %>% .[[1]], district = 1:10)
+
+```
+
+Perform a check of proportion of district
+
+Cool, district was used as quotas! 
+Also, samples by district are rather small.
+```{r eval=FALSE, include=FALSE}
+
+district_all_surveys %>%
+  map(~ .x %>% as_vector) %>%
+  map(table)
+
+```
+
+
+# Main questions of interest 
+
+Q1 Uses bike to move around BCN - utilitza bicicleta per desplacar-se per BCN
+Q2 Uses bicing - en bicing
+Q3 How do you rate the bike lanes in BCN - Com valora la xarxa de carrils bici a la ciutat de Barcelona
+
+
+# Main bike questions
+
+## Q1 - UTILITZA BICICLETA PER DESPLAÇAR-SE PER BARCELONA
+```{r}
+
+q1_exists <- lookup_names_labels %>%
+  map_lgl(~ any(str_detect(.x$var_labels, "UTILITZA BICICLETA PER DESPLAÇAR-SE PER BARCELONA")))
+
+q1_index <- lookup_names_labels %>%
+  map(~ which(.x$var_labels == "UTILITZA BICICLETA PER DESPLAÇAR-SE PER BARCELONA") ) %>%
+  unlist
+
+q1_all_surveys <- all_surveys_spss_data[q1_exists] %>%
+  map2(.y = q1_index, ~.x[,.y])
+
+```
+
+Awesome, different labels in same question!
+```{r}
+
+map(q1_all_surveys, ~get_labels(.x)) 
+
+```
+
+```{r}
+  # multiple categories for bike users
+index_multiple_categories <- map_dbl(q1_all_surveys, ~get_labels(.x)[[1]] %>% length) != 3
+
+q1_all_surveys_recoded <- q1_all_surveys
+
+      # recode for vars with only yes/no
+q1_all_surveys_recoded[!index_multiple_categories] <- q1_all_surveys[!index_multiple_categories] %>%
+  map(~.x %>% as_vector == 1)
+      # recode for vars with multiple user categories
+q1_all_surveys_recoded[index_multiple_categories] <- q1_all_surveys[index_multiple_categories] %>%
+  map(~.x %>% as_vector < 4)
+
+rm(index_multiple_categories)
+
+```
+
+```{r}
+q1_all_surveys_recoded %>%
+  map(sum)
+```
+
+## Df of Q1 with all other variables
+
+```{r}
+      # I'm sure this can be done in one step using pmap
+q1_all_surveys_recoded_dfs <- map2(.x = q1_all_surveys_recoded,
+     .y = district_all_surveys[q1_exists],
+     ~ bind_cols(uses_bike = .x, .y))
+
+q1_all_surveys_recoded_dfs %<>% map2(
+     .y = age_all_surveys_categorical[q1_exists],
+     ~ bind_cols(uses_bike = .x, .y))
+
+for(i in seq_along(q1_all_surveys_recoded_dfs)){
+  
+  names(q1_all_surveys_recoded_dfs[[i]]) <- c("uses_bike", "district", "age_recoded")
+  
+}
+
+```
+
+## Q1 by district
+Samples are rather small (<50)
+```{r}
+
+ q1_all_surveys_recoded_merged_df <- q1_all_surveys_recoded_dfs %>%
+  bind_rows()
+
+table_q1_by_district <- q1_all_surveys_recoded_merged_df %>%
+  count(district, uses_bike) %>%
+        group_by(district) %>%
+        mutate(prop = n/sum(n)) %>%
+        filter(uses_bike == T)
+
+table_q1_by_district %<>%
+  left_join(district_lookup_names)
+
+table_q1_by_district %>%
+  write_csv(here("interim_outputs", "survey_table_bike_use_district.csv"))
+
+table_q1_by_district
+
+```
+
+## Q1 by age categories
+
+```{r}
+
+table_q1_by_age <- q1_all_surveys_recoded_merged_df %>%
+  count(age_recoded, uses_bike) %>%
+        group_by(age_recoded) %>%
+        mutate(prop = n/sum(n)) %>%
+        filter(uses_bike == T)
+
+table_q1_by_age %>%
+  write_csv(here("interim_outputs", "survey_table_bike_use_age.csv"))
+
+table_q1_by_age
+
+```
+
+# Q1 by district and age categories 
+
+```{r}
+
+table_q1_by_district_and_age <- q1_all_surveys_recoded_merged_df %>%
+  count(district, age_recoded, uses_bike) %>%
+        group_by(district, age_recoded) %>%
+        mutate(prop = n/sum(n)) %>%
+        filter(uses_bike == T) %>%
+    arrange(age_recoded, district)
+
+table_q1_by_district_and_age %<>%
+  left_join(district_lookup_names)
+
+table_q1_by_district_and_age %>%
+  write_csv(here("interim_outputs", "survey_table_bike_use_district_and_age.csv"))
+            
+table_q1_by_district_and_age
+
+```
+
